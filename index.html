@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Afinador Visual – Canvas</title>
+<style>
+  :root{--bg1:#0b0b2a;--bg2:#2a2a72;--neon:#00ffa6;--mag:#ff3af2}
+  body{margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Arial;background:
+    radial-gradient(1200px 600px at 20% -10%, #ff9df5 0%, var(--bg2) 45%, var(--bg1) 100%);
+    color:#fff}
+  .wrap{max-width:760px;margin:24px auto;padding:16px}
+  h1{margin:0 0 12px;font-weight:900;text-shadow:0 0 12px rgba(255,255,255,.35)}
+  .panel{background:rgba(255,255,255,.06);border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.25);padding:14px;margin-top:12px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  select,input[type=number]{padding:6px 10px;border-radius:8px;border:1px solid #666;background:#0e0e2a;color:#fff}
+  button{padding:10px 16px;border-radius:10px;border:none;cursor:pointer;font-weight:800}
+  .cta{background:linear-gradient(90deg,#00ffa6,#00c3ff);color:#00111a;box-shadow:0 8px 30px rgba(0,255,166,.3)}
+  .stop{background:linear-gradient(90deg,#ff6a9e,#ff3af2);color:#fff;box-shadow:0 8px 30px rgba(255,58,242,.25)}
+  .meter{height:10px;width:100%;max-width:420px;background:rgba(255,255,255,.12);border-radius:999px;overflow:hidden}
+  .fill{height:100%;background:linear-gradient(90deg,#ffc400,#00ffa6)}
+  .note{font-size:64px;font-weight:900;letter-spacing:1px}
+  .freq{opacity:.85}
+  .tuner{position:relative;height:60px;background:rgba(0,0,0,.25);border-radius:12px;margin-top:10px;overflow:hidden}
+  .ticks{position:absolute;inset:0;display:flex;justify-content:space-between;align-items:center;padding:0 12px;font-size:12px;opacity:.65}
+  .tick{width:1px;height:100%;border-left:1px dashed rgba(255,255,255,.25);display:flex;align-items:center}
+  .pointer{position:absolute;bottom:0;transform:translateX(-50%);width:4px;height:100%;border-radius:4px}
+  .kbd{display:grid;grid-template-columns:repeat(12,1fr);gap:6px;margin-top:12px}
+  .key{padding:12px 0;text-align:center;border-radius:10px;font-weight:700}
+  .status{opacity:.9;margin-top:8px}
+  .hint{font-size:12px;opacity:.75;margin-top:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Afinador Visual 🎶✨ (Canvas)</h1>
+
+  <div class="panel">
+    <div class="row">
+      <label>Microfone:</label>
+      <select id="mic"></select>
+      <button id="refresh">Atualizar mics</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label>Sensibilidade (ganho): <span id="gainVal">0</span> dB</label>
+      <input id="gain" type="range" min="-12" max="24" step="1" value="0" style="width:220px" />
+      <label>A4 (Hz):</label>
+      <input id="a4" type="number" min="415" max="466" step="1" value="440" />
+      <label>Modo voz:</label>
+      <select id="voice">
+        <option value="bass">Grave (50–400 Hz)</option>
+        <option value="tenor" selected>Tenor/Mezzo (70–900 Hz)</option>
+        <option value="soprano">Aguda (150–1200 Hz)</option>
+      </select>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="start" class="cta">Começar</button>
+      <button id="stop"  class="stop" disabled>Parar</button>
+    </div>
+    <div id="msg" class="status">Clique em Começar e permita o microfone.</div>
+
+    <div class="meter" style="margin-top:10px"><div id="fill" class="fill" style="width:0%"></div></div>
+    <div class="hint">Nível de entrada (RMS): <span id="rms">0.000</span></div>
+  </div>
+
+  <div class="panel" id="readout">
+    <div class="note" id="note">—</div>
+    <div class="freq" id="freq">Aguardando som...</div>
+    <div class="tuner">
+      <div class="ticks">
+        <div class="tick"><span style="opacity:.7">-50</span></div>
+        <div class="tick"><span style="opacity:.7">-25</span></div>
+        <div class="tick"><span style="opacity:.7">0</span></div>
+        <div class="tick"><span style="opacity:.7">25</span></div>
+        <div class="tick"><span style="opacity:.7">50</span></div>
+      </div>
+      <div id="ptr" class="pointer" style="left:50%;background:#ff3af2;box-shadow:0 0 16px #ff3af2"></div>
+    </div>
+    <div class="hint">Desvio: <b id="cents">0</b> cents</div>
+
+    <div class="kbd" id="kbd"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  // ===== Helpers de nota =====
+  let A4REF = 440;
+  const NAMES = ["C","C♯","D","D♯","E","F","F♯","G","G♯","A","A♯","B"];
+  function freqToData(f) {
+    if (!f || !isFinite(f)) return null;
+    const n = Math.round(12 * Math.log2(f / A4REF)) + 69;
+    const note = NAMES[n % 12];
+    const octave = Math.floor(n / 12) - 1;
+    const refFreq = A4REF * Math.pow(2, (n - 69) / 12);
+    const cents = Math.round(1200 * Math.log2(f / refFreq));
+    return {note, octave, cents, refFreq, midi:n};
+  }
+
+  // ===== Autocorrelação simples (YIN-lite) =====
+  function detectPitch(buf, sr, minF, maxF, energyThresh=0.008) {
+    // nível
+    let rms = 0;
+    for (let i=0;i<buf.length;i++) rms += buf[i]*buf[i];
+    rms = Math.sqrt(rms/buf.length);
+    if (rms < energyThresh) return {freq:null, rms};
+
+    const minLag = Math.floor(sr / maxF);
+    const maxLag = Math.floor(sr / minF);
+    let bestLag = -1, bestCorr = 0;
+
+    for (let lag=minLag; lag<=maxLag; lag++){
+      let corr = 0;
+      for (let i=0; i<buf.length-lag; i++){
+        corr += buf[i]*buf[i+lag];
+      }
+      if (corr > bestCorr){ bestCorr = corr; bestLag = lag; }
+    }
+    if (bestLag>0) return {freq: sr/bestLag, rms};
+    return {freq:null, rms};
+  }
+
+  // ===== DOM =====
+  const selMic = document.getElementById('mic');
+  const btnRefresh = document.getElementById('refresh');
+  const btnStart = document.getElementById('start');
+  const btnStop  = document.getElementById('stop');
+  const msg = document.getElementById('msg');
+  const gainSlider = document.getElementById('gain');
+  const gainVal = document.getElementById('gainVal');
+  const a4Input = document.getElementById('a4');
+  const voiceSel = document.getElementById('voice');
+  const fill = document.getElementById('fill');
+  const rmsOut = document.getElementById('rms');
+  const noteEl = document.getElementById('note');
+  const freqEl = document.getElementById('freq');
+  const centsEl = document.getElementById('cents');
+  const pointer = document.getElementById('ptr');
+  const kbd = document.getElementById('kbd');
+
+  // teclado (12 notas)
+  NAMES.forEach(n=>{
+    const d=document.createElement('div');
+    const sharp = n.includes('♯');
+    d.className='key';
+    d.style.background = sharp ? '#111' : '#fff';
+    d.style.color = sharp ? '#fff' : '#000';
+    d.textContent = n;
+    kbd.appendChild(d);
+  });
+
+  // Estado de áudio
+  let ctx=null, analyser=null, srcNode=null, gainNode=null, stream=null, raf=null, buf=null;
+  const setButtons = (running)=>{
+    btnStart.disabled = running;
+    btnStop.disabled  = !running;
+  };
+
+  async function listMics(){
+    const all = await navigator.mediaDevices.enumerateDevices();
+    const mics = all.filter(d=>d.kind==='audioinput');
+    selMic.innerHTML = '';
+    for (const m of mics){
+      const opt=document.createElement('option');
+      opt.value = m.deviceId;
+      opt.textContent = m.label || 'Microfone';
+      selMic.appendChild(opt);
+    }
+  }
+
+  btnRefresh.onclick = listMics;
+
+  gainSlider.oninput = ()=>{ gainVal.textContent = gainSlider.value; if (gainNode) gainNode.gain.value = dBtoLinear(gainSlider.value); };
+  a4Input.oninput = ()=>{ A4REF = Number(a4Input.value||440); };
+
+  function dBtoLinear(db){ return Math.pow(10, db/20); }
+
+  function voiceRange(){
+    const v = voiceSel.value;
+    if (v==='bass') return [50, 400];
+    if (v==='soprano') return [150,1200];
+    return [70,900];
+  }
+
+  async function start(){
+    try{
+      setButtons(true);
+      A4REF = Number(a4Input.value||440);
+
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      await ctx.resume();
+
+      const deviceId = selMic.value ? { exact: selMic.value } : undefined;
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId,
+          echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+          channelCount: 1, sampleRate: {ideal: 48000}
+        }
+      });
+
+      srcNode = ctx.createMediaStreamSource(stream);
+      gainNode = ctx.createGain(); gainNode.gain.value = dBtoLinear(gainSlider.value);
+      analyser = ctx.createAnalyser(); analyser.fftSize = 4096; analyser.smoothingTimeConstant = 0.85;
+
+      srcNode.connect(gainNode).connect(analyser);
+      buf = new Float32Array(analyser.fftSize);
+
+      msg.textContent = "Ouvindo… cante 'laaa' perto do microfone.";
+      loop();
+    }catch(e){
+      console.error(e);
+      msg.textContent = "Erro ao iniciar. Verifique permissões/HTTPS e sele
